@@ -1,76 +1,38 @@
-11.x.x (relative to 11.0.0a8)
+11.x.x (relative to 11.0.0)
 ------
 
 
 
-11.0.0a8 (relative to 11.0.0a7)
---------
-
-- Cortex : Updated to version 10.7.0.0a10.
-- Nanobind : Added version 2.12.0.
-- OpenVDB : Updated to version 12.1.1.
-- PyBind11 : Reverted to version 2.10.4 [^1].
-- Robin-map : Added version 1.4.1.
-
-[^1]: To be omitted from the notes for the final 11.0.0 release.
-
-11.0.0a7 (relative to 11.0.0a6)
---------
-
-- MaterialX : Updated to version 1.39.4.
-- PyBind11 : Updated to version 2.13.6.
-- USD : Updated to version 26.05.
-
-11.0.0a6 (relative to 11.0.0a5)
---------
-
-- Cycles : Applied patch to avoid a crash when generating tangents for subdivision meshes.
-
-11.0.0a5 (relative to 11.0.0a4)
---------
-
-- Cortex : Updated to version 10.7.0.0a9.
-- Cycles :
-  - Updated to version 5.1.0.
-  - Applied patch to support geometry motion blur with an even number of steps (from Blender upstream).
-- SSE2NEON : Added version 1.9.1 when building on macOS.
-
-11.0.0a4 (relative to 11.0.0a3)
---------
-
-- Cortex : Updated to version 10.7.0.0a7.
-- OpenColorIO : Added ACES 2.0 configs.
-- USD : Updated to version 26.03.
-
-11.0.0a3 (relative to 11.0.0a2)
---------
-
-- CI : Build artifacts and releases now include a "-platform##" suffix denoting their target VFX Reference Platform year. This replaces the "gcc" version suffix on Linux builds and the "arm64" suffix on macOS. macOS releases remain arm64 only.
-- Cortex : Updated to version 10.7.0.0a6.
-- Cycles : Updated to version 5.0.0.
-- Embree : Updated to version 4.4.0.
-- OpenSubdiv : Updated to version 3.6.1.
-
-11.0.0a2 (relative to 11.0.0a1)
---------
-
-- Cortex : Updated to version 10.7.0.0a3.
-
-11.0.0a1 (relative to 10.0.0)
---------
+11.0.0 (relative to 10.0.0)
+------
 
 - Boost : Updated to version 1.85.0.
-- Cortex : Updated to version 10.7.0.0a2.
+- Cortex : Updated to version 10.7.0.0.
+- Cycles :
+  - Updated to version 5.1.0.
+  - Applied patch to support geometry motion blur with an even number of steps.
+  - Applied patch to avoid a crash when generating tangents for subdivision meshes.
+- Embree : Updated to version 4.4.0.
 - Imath : Updated to version 3.1.12.
 - Jemalloc : Removed when building on macOS.
 - LLVM : Updated to version 17.0.6.
-- OpenColorIO : Updated to version 2.4.2.
+- MaterialX : Updated to version 1.39.4.
+- Nanobind : Added version 2.12.0.
+- OpenColorIO :
+  - Updated to version 2.4.2.
+  - Added ACES 2.0 configs.
 - OpenEXR : Updated to version 3.3.6.
 - OpenShadingLanguage : Updated to version 1.14.8.0.
+- OpenSubdiv : Updated to version 3.6.1.
+- OpenVDB : Updated to version 12.1.1.
 - PySide : Updated to version 6.5.8.
 - Python : Updated to version 3.11.14.
 - Qt : Updated to version 6.5.8.
+- Robin-map : Added version 1.4.1.
+- SSE2NEON : Added version 1.9.1 when building on macOS.
 - TBB : Updated to version 2021.13.0.
+- USD : Updated to version 26.05.
+- CI : Build artifacts and releases now include a "-platform##" suffix denoting their target VFX Reference Platform year. This replaces the "gcc" version suffix on Linux builds and the "arm64" suffix on macOS. macOS releases remain arm64 only.
 
 10.0.0 (relative to 9.1.0)
 ------

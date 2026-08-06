@@ -14,7 +14,7 @@ import sys
 import tarfile
 import zipfile
 
-__version = "11.0.0a8"
+__version = "11.0.0"
 
 """
 Config file format
