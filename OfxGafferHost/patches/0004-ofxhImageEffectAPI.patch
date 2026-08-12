@@ -1,0 +1,36 @@
+# OfxGafferHost: Pre-run DescribeInContext + null-handle guard
+# Why: Some plugins (e.g. ColorLookup, Shadertoy) query contexts during Describe that stock HostSupport didn't pre-describe, and some hosts call createInstance with NULL handle leading to deref crash.
+# Technical: After Describe, pre-run DescribeInContext for all _knownContexts so overlay interact and clip prefs are described before instance creation. Add null-handle guard in createInstance returning kOfxStatErrBadHandle instead of crashing.
+--- a/HostSupport/src/ofxhImageEffectAPI.cpp
++++ b/HostSupport/src/ofxhImageEffectAPI.cpp
+@@ -184,6 +184,18 @@
+             _pluginHandle.reset();
+             return nullptr;
+           }
++
++          try {
++            // Also do DescribeInContext for each known context so it's ready
++            for( const auto &ctx : _knownContexts ) {
++              Descriptor *desc = getContext(ctx);
++              if( !desc ) {
++                std::cerr << "WARN: DescribeInContext failed for context " << ctx << std::endl;
++              }
++            }
++          } catch( ... ) {
++            std::cerr << "WARN: DescribeInContext threw exception" << std::endl;
++          }
+         }
+ 
+         return _pluginHandle.get();
+@@ -239,7 +251,10 @@
+         /// (not because we are expecting the results to change, but because plugin
+         /// might get confused otherwise), then a describe_in_context
+ 
+-        getPluginHandle();
++        if( !getPluginHandle() )
++        {
++          return 0;
++        }
+ 
+         Descriptor *desc = getContext(context);
+         

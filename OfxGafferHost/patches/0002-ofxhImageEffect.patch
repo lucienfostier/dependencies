@@ -1,0 +1,71 @@
+# OfxGafferHost: OpenGL render support + DescribeInContext fix
+# Why: Shadertoy and other GL plugins declare openGLRenderSupported="true" and need host to advertise GL via kOfxImageEffectPropOpenGLEnabled, and to handle contextAttached/Detached correctly. Stock 1.5s HostSupport had no openGLEnabled prop and passed 0,0 for contextAttached outArgs, causing Shadertoy to probe outArgs and crash on NULL deref.
+# Technical: Add kOfxImageEffectPropOpenGLEnabled property (default "0") to instance spec + propagate to render inArgs when set. Make contextAttached/contextDetached pass valid-but-empty Property::Set instead of 0,0. Support -DOFX_SUPPORTS_OPENGLRENDER guard.
+--- a/HostSupport/src/ofxhImageEffect.cpp
++++ b/HostSupport/src/ofxhImageEffect.cpp
+@@ -324,6 +324,7 @@
+ 	{ kOfxImageEffectPropCudaStreamSupported, Property::eString, 1, false, "false" },
+ 	{ kOfxImageEffectPropMetalRenderSupported, Property::eString, 1, false, "false" },
+ 	{ kOfxImageEffectPropOpenCLRenderSupported, Property::eString, 1, false, "false" },
++	{ kOfxImageEffectPropOpenGLEnabled, Property::eInt, 1, false, "0" },
+ #endif
+         Property::propSpecEnd
+       };
+@@ -849,7 +850,10 @@
+ #       ifdef OFX_DEBUG_ACTIONS
+           std::cout << "OFX: "<<(void*)this<<"->"<<kOfxActionOpenGLContextAttached<<"()"<<std::endl;
+ #       endif
+-        OfxStatus st = mainEntry(kOfxActionOpenGLContextAttached,this->getHandle(),0,0);
++        // Pass valid-but-empty property sets — plugins like Shadertoy
++        // probe outArgs for OpenGL context data during this action.
++        Property::Set inArgs, outArgs;
++        OfxStatus st = mainEntry(kOfxActionOpenGLContextAttached,this->getHandle(), &inArgs, &outArgs);
+ #       ifdef OFX_DEBUG_ACTIONS
+           std::cout << "OFX: "<<(void*)this<<"->"<<kOfxActionOpenGLContextAttached<<"()->"<<StatStr(st)<<std::endl;
+ #       endif
+@@ -860,7 +864,10 @@
+ #       ifdef OFX_DEBUG_ACTIONS
+           std::cout << "OFX: "<<(void*)this<<"->"<<kOfxActionOpenGLContextDetached<<"()"<<std::endl;
+ #       endif
+-        OfxStatus st = mainEntry(kOfxActionOpenGLContextDetached,this->getHandle(),0,0);
++        // Pass valid-but-empty property sets — plugins access inArgs
++        // to find context data to free on detach.
++        Property::Set inArgs, outArgs;
++        OfxStatus st = mainEntry(kOfxActionOpenGLContextDetached,this->getHandle(), &inArgs, &outArgs);
+ #       ifdef OFX_DEBUG_ACTIONS
+           std::cout << "OFX: "<<(void*)this<<"->"<<kOfxActionOpenGLContextDetached<<"()->"<<StatStr(st)<<std::endl;
+ #       endif
+@@ -902,6 +909,12 @@
+         inArgs.setIntProperty(kOfxImageEffectPropSequentialRenderStatus,sequentialRender);
+         inArgs.setIntProperty(kOfxImageEffectPropInteractiveRenderStatus,interactiveRender);
+ 
++        bool glEnabled = _properties.getIntProperty(kOfxImageEffectPropOpenGLEnabled, 0) != 0;
++        if( glEnabled )
++        {
++          inArgs.setIntProperty( kOfxImageEffectPropOpenGLEnabled, 1 );
++        }
++
+ #       ifdef OFX_DEBUG_ACTIONS
+           std::cout << "OFX: "<<(void*)this<<"->"<<kOfxImageEffectActionBeginSequenceRender<<"(("<<startFrame<<","<<endFrame<<"),"<<step<<","<<interactive<<",("<<renderScale.x<<","<<renderScale.y<<"),"<<sequentialRender<<","<<interactiveRender
+           <<")"<<std::endl;
+@@ -932,6 +945,7 @@
+           { kOfxImageEffectPropSequentialRenderStatus, Property::eInt, 1, true, "0" },
+           { kOfxImageEffectPropInteractiveRenderStatus, Property::eInt, 1, true, "0" },
+           { kOfxImageEffectPropRenderQualityDraft, Property::eInt, 1, true, "0" },
++          { kOfxImageEffectPropOpenGLEnabled, Property::eInt, 1, true, "0" },
+           Property::propSpecEnd
+         };
+ 
+@@ -945,6 +959,12 @@
+         inArgs.setIntProperty(kOfxImageEffectPropInteractiveRenderStatus,interactiveRender);
+         inArgs.setIntProperty(kOfxImageEffectPropRenderQualityDraft,draftRender);
+ 
++        bool glEnabled = _properties.getIntProperty(kOfxImageEffectPropOpenGLEnabled, 0) != 0;
++        if( glEnabled )
++        {
++          inArgs.setIntProperty( kOfxImageEffectPropOpenGLEnabled, 1 );
++        }
++
+ #       ifdef OFX_DEBUG_ACTIONS
+           std::cout << "OFX: "<<(void*)this<<"->"<<kOfxImageEffectActionRender<<"("<<time<<","<<field<<",("<<renderRoI.x1<<","<<renderRoI.y1<<","<<renderRoI.x2<<","<<renderRoI.y2<<"),("<<renderScale.x<<","<<renderScale.y<<"),"<<sequentialRender<<","<<interactiveRender
+           <<")"<<std::endl;

@@ -1,0 +1,368 @@
+diff -ruN a/Examples/BoxBlur/boxblur.cpp b/Examples/BoxBlur/boxblur.cpp
+--- a/Examples/BoxBlur/boxblur.cpp	1969-12-31 16:00:00.000000000 -0800
++++ b/Examples/BoxBlur/boxblur.cpp	2026-08-11 23:00:01.282010824 -0700
+@@ -0,0 +1,322 @@
++#include <stdexcept>
++#include <new>
++#include <cstring>
++#include <cmath>
++#include "ofxImageEffect.h"
++#include "ofxMemory.h"
++#include "ofxMultiThread.h"
++
++#include "../include/ofxUtilities.H"
++
++#if defined __APPLE__ || defined __linux__ || defined __FreeBSD__
++#  define EXPORT __attribute__((visibility("default")))
++#elif defined _WIN32
++#  define EXPORT OfxExport
++#else
++#  error Not building on your operating system quite yet
++#endif
++
++OfxHost                 *gHost;
++OfxImageEffectSuiteV1 *gEffectHost = 0;
++OfxPropertySuiteV1    *gPropHost = 0;
++OfxParameterSuiteV1   *gParamHost = 0;
++OfxMemorySuiteV1      *gMemoryHost = 0;
++OfxMultiThreadSuiteV1 *gThreadHost = 0;
++OfxMessageSuiteV1     *gMessageSuite = 0;
++OfxInteractSuiteV1    *gInteractHost = 0;
++
++struct MyInstanceData {
++  OfxImageClipHandle sourceClip;
++  OfxImageClipHandle outputClip;
++  OfxParamHandle sizeParam;
++};
++
++static MyInstanceData *
++getMyInstanceData( OfxImageEffectHandle effect)
++{
++  OfxPropertySetHandle effectProps;
++  gEffectHost->getPropertySet(effect, &effectProps);
++  MyInstanceData *myData = 0;
++  gPropHost->propGetPointer(effectProps, kOfxPropInstanceData, 0, (void **) &myData);
++  return myData;
++}
++
++static OfxStatus
++createInstance( OfxImageEffectHandle effect)
++{
++  OfxPropertySetHandle effectProps;
++  gEffectHost->getPropertySet(effect, &effectProps);
++  OfxParamSetHandle paramSet;
++  gEffectHost->getParamSet(effect, &paramSet);
++
++  MyInstanceData *myData = new MyInstanceData;
++  gParamHost->paramGetHandle(paramSet, "size", &myData->sizeParam, 0);
++  gEffectHost->clipGetHandle(effect, kOfxImageEffectSimpleSourceClipName, &myData->sourceClip, 0);
++  gEffectHost->clipGetHandle(effect, kOfxImageEffectOutputClipName, &myData->outputClip, 0);
++
++  gPropHost->propSetPointer(effectProps, kOfxPropInstanceData, 0, (void *) myData);
++  return kOfxStatOK;
++}
++
++static OfxStatus
++destroyInstance( OfxImageEffectHandle effect)
++{
++  MyInstanceData *myData = getMyInstanceData(effect);
++  if(myData)
++    delete myData;
++  return kOfxStatOK;
++}
++
++static OfxStatus
++getSpatialRoD( OfxImageEffectHandle effect, OfxPropertySetHandle inArgs, OfxPropertySetHandle outArgs)
++{
++  MyInstanceData *myData = getMyInstanceData(effect);
++  OfxTime time;
++  gPropHost->propGetDouble(inArgs, kOfxPropTime, 0, &time);
++  OfxRectD rod;
++  gEffectHost->clipGetRegionOfDefinition(myData->sourceClip, time, &rod);
++  gPropHost->propSetDoubleN(outArgs, kOfxImageEffectPropRegionOfDefinition, 4, &rod.x1);
++  return kOfxStatOK;
++}
++
++static OfxStatus
++getSpatialRoI( OfxImageEffectHandle effect, OfxPropertySetHandle inArgs, OfxPropertySetHandle outArgs)
++{
++  MyInstanceData *myData = getMyInstanceData(effect);
++  OfxRectD roi;
++  gPropHost->propGetDoubleN(inArgs, kOfxImageEffectPropRegionOfInterest, 4, &roi.x1);
++
++  int sizeVal;
++  gParamHost->paramGetValueAtTime(myData->sizeParam, 0, &sizeVal);
++  int radius = sizeVal / 2;
++
++  OfxRectD blurredRoi;
++  blurredRoi.x1 = roi.x1 - radius;
++  blurredRoi.y1 = roi.y1 - radius;
++  blurredRoi.x2 = roi.x2 + radius;
++  blurredRoi.y2 = roi.y2 + radius;
++
++  gPropHost->propSetDoubleN(outArgs, "OfxImageClipPropRoI_Source", 4, &blurredRoi.x1);
++  return kOfxStatOK;
++}
++
++static OfxStatus
++render( OfxImageEffectHandle instance, OfxPropertySetHandle inArgs, OfxPropertySetHandle /*outArgs*/)
++{
++  OfxTime time;
++  OfxRectI renderWindow;
++  gPropHost->propGetDouble(inArgs, kOfxPropTime, 0, &time);
++  gPropHost->propGetIntN(inArgs, kOfxImageEffectPropRenderWindow, 4, &renderWindow.x1);
++
++  MyInstanceData *myData = getMyInstanceData(instance);
++
++  int srcRowBytes, srcBitDepth, dstRowBytes, dstBitDepth;
++  bool srcIsAlpha, dstIsAlpha;
++  OfxRectI srcRect, dstRect;
++  void *src, *dst;
++
++  OfxPropertySetHandle sourceImg = ofxuGetImage(myData->sourceClip, time, srcRowBytes, srcBitDepth, srcIsAlpha, srcRect, src);
++  if(sourceImg == NULL) return kOfxStatFailed;
++
++  OfxPropertySetHandle outputImg = ofxuGetImage(myData->outputClip, time, dstRowBytes, dstBitDepth, dstIsAlpha, dstRect, dst);
++  if(outputImg == NULL) {
++    gEffectHost->clipReleaseImage(sourceImg);
++    return kOfxStatFailed;
++  }
++
++  if(srcIsAlpha != dstIsAlpha || srcBitDepth != dstBitDepth) {
++    gEffectHost->clipReleaseImage(sourceImg);
++    gEffectHost->clipReleaseImage(outputImg);
++    return kOfxStatErrImageFormat;
++  }
++
++  int sizeVal = 0;
++  gParamHost->paramGetValueAtTime(myData->sizeParam, time, &sizeVal);
++  int radius = sizeVal / 2;
++
++  if(dstIsAlpha) {
++    for(int y = renderWindow.y1; y < renderWindow.y2; ++y) {
++      float *dstRow = (float *)(((char *)dst) + (y - dstRect.y1) * dstRowBytes);
++      for(int x = renderWindow.x1; x < renderWindow.x2; ++x) {
++        float sum = 0.0f;
++        int count = 0;
++        for(int ky = -radius; ky <= radius; ++ky) {
++          for(int kx = -radius; kx <= radius; ++kx) {
++            int sx = x + kx;
++            int sy = y + ky;
++            if(sx >= srcRect.x1 && sx < srcRect.x2 && sy >= srcRect.y1 && sy < srcRect.y2) {
++              float *srcRow = (float *)(((char *)src) + (sy - srcRect.y1) * srcRowBytes);
++              sum += srcRow[sx - srcRect.x1];
++              ++count;
++            }
++          }
++        }
++        dstRow[x - dstRect.x1] = (count > 0) ? sum / count : 0.0f;
++      }
++    }
++  }
++  else {
++    for(int y = renderWindow.y1; y < renderWindow.y2; ++y) {
++      OfxRGBAColourF *dstRow = (OfxRGBAColourF *)(((char *)dst) + (y - dstRect.y1) * dstRowBytes);
++      for(int x = renderWindow.x1; x < renderWindow.x2; ++x) {
++        float rSum = 0, gSum = 0, bSum = 0, aSum = 0;
++        int count = 0;
++        for(int ky = -radius; ky <= radius; ++ky) {
++          for(int kx = -radius; kx <= radius; ++kx) {
++            int sx = x + kx;
++            int sy = y + ky;
++            if(sx >= srcRect.x1 && sx < srcRect.x2 && sy >= srcRect.y1 && sy < srcRect.y2) {
++              OfxRGBAColourF *srcPix = (OfxRGBAColourF *)(((char *)src) + (sy - srcRect.y1) * srcRowBytes) + (sx - srcRect.x1);
++              rSum += srcPix->r;
++              gSum += srcPix->g;
++              bSum += srcPix->b;
++              aSum += srcPix->a;
++              ++count;
++            }
++          }
++        }
++        if(count > 0) {
++          dstRow[x - dstRect.x1].r = rSum / count;
++          dstRow[x - dstRect.x1].g = gSum / count;
++          dstRow[x - dstRect.x1].b = bSum / count;
++          dstRow[x - dstRect.x1].a = aSum / count;
++        }
++        else {
++          dstRow[x - dstRect.x1] = {0, 0, 0, 0};
++        }
++      }
++    }
++  }
++
++  gEffectHost->clipReleaseImage(sourceImg);
++  gEffectHost->clipReleaseImage(outputImg);
++
++  return kOfxStatOK;
++}
++
++static OfxStatus
++describeInContext( OfxImageEffectHandle effect, OfxPropertySetHandle inArgs)
++{
++  OfxPropertySetHandle props;
++  gEffectHost->clipDefine(effect, kOfxImageEffectOutputClipName, &props);
++  gPropHost->propSetString(props, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
++  gPropHost->propSetString(props, kOfxImageEffectPropSupportedComponents, 1, kOfxImageComponentAlpha);
++
++  gEffectHost->clipDefine(effect, kOfxImageEffectSimpleSourceClipName, &props);
++  gPropHost->propSetString(props, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA);
++  gPropHost->propSetString(props, kOfxImageEffectPropSupportedComponents, 1, kOfxImageComponentAlpha);
++
++  OfxParamSetHandle paramSet;
++  gEffectHost->getParamSet(effect, &paramSet);
++
++  gParamHost->paramDefine(paramSet, kOfxParamTypeInteger, "size", &props);
++  gPropHost->propSetInt(props, kOfxParamPropDefault, 0, 5);
++  gPropHost->propSetInt(props, kOfxParamPropMin, 0, 0);
++  gPropHost->propSetInt(props, kOfxParamPropMax, 0, 100);
++  gPropHost->propSetInt(props, kOfxParamPropDisplayMin, 0, 0);
++  gPropHost->propSetInt(props, kOfxParamPropDisplayMax, 0, 100);
++  gPropHost->propSetString(props, kOfxParamPropHint, 0, "Blur kernel size (diameter in pixels)");
++  gPropHost->propSetString(props, kOfxParamPropScriptName, 0, "size");
++  gPropHost->propSetString(props, kOfxPropLabel, 0, "Size");
++
++  gParamHost->paramDefine(paramSet, kOfxParamTypePage, "Main", &props);
++  gPropHost->propSetString(props, kOfxParamPropPageChild, 0, "size");
++
++  return kOfxStatOK;
++}
++
++static OfxStatus
++describe(OfxImageEffectHandle effect)
++{
++  OfxStatus stat;
++  if((stat = ofxuFetchHostSuites()) != kOfxStatOK)
++    return stat;
++
++  OfxPropertySetHandle effectProps;
++  gEffectHost->getPropertySet(effect, &effectProps);
++
++  gPropHost->propSetInt(effectProps, kOfxImageEffectPluginPropFieldRenderTwiceAlways, 0, 0);
++  gPropHost->propSetInt(effectProps, kOfxImageEffectPropSupportsMultipleClipDepths, 0, 1);
++
++  gPropHost->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthByte);
++  gPropHost->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 1, kOfxBitDepthShort);
++  gPropHost->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 2, kOfxBitDepthFloat);
++
++  gPropHost->propSetString(effectProps, kOfxPropLabel, 0, "OFX Box Blur");
++  gPropHost->propSetString(effectProps, kOfxImageEffectPluginPropGrouping, 0, "OFX Example");
++
++  gPropHost->propSetString(effectProps, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter);
++
++  return kOfxStatOK;
++}
++
++static OfxStatus
++pluginMain(const char *action, const void *handle, OfxPropertySetHandle inArgs, OfxPropertySetHandle outArgs)
++{
++  try {
++    OfxImageEffectHandle effect = (OfxImageEffectHandle) handle;
++
++    if(strcmp(action, kOfxActionDescribe) == 0) {
++      return describe(effect);
++    }
++    else if(strcmp(action, kOfxImageEffectActionDescribeInContext) == 0) {
++      return describeInContext(effect, inArgs);
++    }
++    else if(strcmp(action, kOfxActionCreateInstance) == 0) {
++      return createInstance(effect);
++    }
++    else if(strcmp(action, kOfxActionDestroyInstance) == 0) {
++      return destroyInstance(effect);
++    }
++    else if(strcmp(action, kOfxImageEffectActionRender) == 0) {
++      return render(effect, inArgs, outArgs);
++    }
++    else if(strcmp(action, kOfxImageEffectActionGetRegionOfDefinition) == 0) {
++      return getSpatialRoD(effect, inArgs, outArgs);
++    }
++    else if(strcmp(action, kOfxImageEffectActionGetRegionsOfInterest) == 0) {
++      return getSpatialRoI(effect, inArgs, outArgs);
++    }
++  } catch (std::bad_alloc) {
++    return kOfxStatErrMemory;
++  } catch ( const std::exception& e ) {
++    return kOfxStatErrUnknown;
++  } catch (int err) {
++    return err;
++  } catch ( ... ) {
++    return kOfxStatErrUnknown;
++  }
++
++  return kOfxStatReplyDefault;
++}
++
++static void
++setHostFunc(OfxHost *hostStruct)
++{
++  gHost = hostStruct;
++}
++
++static OfxPlugin boxBlurPlugin =
++{
++  kOfxImageEffectPluginApi,
++  1,
++  "uk.co.thefoundry.BoxBlurPlugin",
++  1,
++  0,
++  setHostFunc,
++  pluginMain
++};
++
++EXPORT OfxPlugin *
++OfxGetPlugin(int nth)
++{
++  if(nth == 0)
++    return &boxBlurPlugin;
++  return 0;
++}
++
++EXPORT int
++OfxGetNumberOfPlugins(void)
++{
++  return 1;
++}
+diff -ruN a/Examples/BoxBlur/Info.plist b/Examples/BoxBlur/Info.plist
+--- a/Examples/BoxBlur/Info.plist	1969-12-31 16:00:00.000000000 -0800
++++ b/Examples/BoxBlur/Info.plist	2026-08-11 23:00:01.286010853 -0700
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>CFBundleDevelopmentRegion</key>
++	<string>English</string>
++	<key>CFBundleExecutable</key>
++	<string>boxblur.ofx</string>
++	<key>CFBundleInfoDictionaryVersion</key>
++	<string>6.0</string>
++	<key>CFBundlePackageType</key>
++	<string>BNDL</string>
++	<key>CFBundleSignature</key>
++	<string>????</string>
++	<key>CFBundleVersion</key>
++	<string>0.0.1d1</string>
++	<key>CSResourcesFileMapped</key>
++	<true/>
++</dict>
++</plist>
+diff -ruN a/Examples/BoxBlur/Makefile b/Examples/BoxBlur/Makefile
+--- a/Examples/BoxBlur/Makefile	1969-12-31 16:00:00.000000000 -0800
++++ b/Examples/BoxBlur/Makefile	2026-08-11 23:00:01.282010824 -0700
+@@ -0,0 +1,5 @@
++PLUGINOBJECTS = boxblur.o
++PLUGINNAME = boxblur
++PATHTOROOT = ../
++
++include ../Makefile.master
+diff -ruN a/Examples/Makefile b/Examples/Makefile
+--- a/Examples/Makefile	2026-08-11 23:00:01.278010796 -0700
++++ b/Examples/Makefile	2026-08-11 23:00:12.838092934 -0700
+@@ -1,4 +1,4 @@
+-SUBDIRS = Basic Custom DepthConverter Invert OpenGL Overlay Rectangle Test
++SUBDIRS = Basic BoxBlur Custom DepthConverter Invert OpenGL Overlay Rectangle Test
+ 
+ all: subdirs
+ 

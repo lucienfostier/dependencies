@@ -1,0 +1,441 @@
+# OfxGafferHost: Fix descriptor-handle param lookup (Sapphire)
+# Why: Sapphire caches Descriptor* handles from DescribeInContext and reuses them in render-time paramGetValue. Stock HostSupport only registers Instance* and uses reinterpret_cast+verifyMagic to map handle->Instance, so descriptor handles miss and return defaults or kOfxStatFailed (ColorBars etc. also hit fallback). This caused ofx_get_param_internal null handle warnings and default values during S_Blur render.
+# Technical: Replace unordered_set<const Instance*> registry with unordered_map<const void*, Instance*> that registers BOTH Instance* and Descriptor* handles to the same Instance*. registerInstance(Instance*, descriptorHandle) maps both, unregisterInstance erases all entries for instance, instanceFromHandle does direct map lookup. Remove defaultFromBase/baseFromHandle fallback, return kOfxStatErrBadHandle for truly unknown handles. Mutex-protected. Sapphire's Show_Blur_Amount HUD and blur render then return actual instance values via getV().
+--- a/HostSupport/src/ofxhParam.cpp
++++ b/HostSupport/src/ofxhParam.cpp
+@@ -21,6 +21,9 @@
+ #include <limits.h>
+ #include <stdarg.h>
+ 
++#include <unordered_map>
++#include <mutex>
++
+ namespace OFX {
+ 
+   namespace Host {
+@@ -1663,6 +1666,38 @@
+       ////////////////////////////////////////////////////////////////////////////////
+       // Suite functions below
+ 
++      // Registry mapping handles (both Instance* and Descriptor*) to Instance*.
++      // Sapphire caches Descriptor* handles from DescribeInContext and passes them
++      // to paramGetValue during render. By registering both handles, we can map
++      // Sapphire's descriptor handles back to the correct Instance for getV().
++      // Protected by a mutex because Gaffer's compute can run on multiple threads.
++      static std::unordered_map<const void*, Instance*> g_handleToInstance;
++      static std::mutex g_instanceRegistryMutex;
++
++      void registerInstance(Instance* inst, const void* descriptorHandle) {
++        std::lock_guard<std::mutex> lock(g_instanceRegistryMutex);
++        g_handleToInstance[inst] = inst;           // Instance* → self
++        g_handleToInstance[descriptorHandle] = inst; // Descriptor* → Instance
++      }
++
++      void unregisterInstance(Instance* inst) {
++        std::lock_guard<std::mutex> lock(g_instanceRegistryMutex);
++        for(auto it = g_handleToInstance.begin(); it != g_handleToInstance.end(); ) {
++          if(it->second == inst) it = g_handleToInstance.erase(it);
++          else ++it;
++        }
++      }
++
++      /// Safe conversion from opaque param handle to Param::Instance*.
++      /// Uses a registry lookup (no memory reads from the handle itself)
++      /// to avoid SIGSEGV from __dynamic_cast on corrupted/dangling pointers.
++      static inline Instance* instanceFromHandle(OfxParamHandle handle) {
++        if(!handle) return nullptr;
++        std::lock_guard<std::mutex> lock(g_instanceRegistryMutex);
++        auto it = g_handleToInstance.find(handle);
++        return it != g_handleToInstance.end() ? it->second : nullptr;
++      }
++
+       static OfxStatus paramDefine(OfxParamSetHandle paramSet,
+                                    const char *paramType,
+                                    const char *name,
+@@ -1825,9 +1860,9 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramGetPropertySet - " << param << ' ' << propHandle << " ...";
+ #       endif
+-        Param::Instance *paramInstance = reinterpret_cast<Param::Instance*>(param);
++        Param::Instance *paramInstance = instanceFromHandle(param);
+         
+-        if(paramInstance && paramInstance->verifyMagic()){
++        if(paramInstance){
+           // get the param property set
+           if (propHandle) {
+             *propHandle = paramInstance->getPropHandle();
+@@ -1840,12 +1875,18 @@
+           std::cout << ' ' << StatStr(kOfxStatOK) << std::endl;
+ #         endif
+           return kOfxStatOK;
+-        } else {
+-#         ifdef OFX_DEBUG_PARAMETERS
+-          std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#         endif
+-          return kOfxStatErrBadHandle;
+         }
++
++        // Fallback: unregistered handle
++#       ifdef OFX_DEBUG_PARAMETERS
++        std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
++#       endif
++        return kOfxStatErrBadHandle;
++
++#       ifdef OFX_DEBUG_PARAMETERS
++        std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
++#       endif
++        return kOfxStatErrBadHandle;
+       }
+ 
+       /// get the current param value
+@@ -1855,29 +1896,29 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramGetValue - " << paramHandle << " ...";
+ #       endif
+-        Instance *paramInstance = reinterpret_cast<Instance*>(paramHandle);
+-        if(!paramInstance || !paramInstance->verifyMagic()) {
+-#         ifdef OFX_DEBUG_PARAMETERS
+-          std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#         endif
+-          return kOfxStatErrBadHandle;
+-        }
++        Instance *paramInstance = instanceFromHandle(paramHandle);
++        if(paramInstance) {
++          va_list ap;
++          va_start(ap,paramHandle);
++          OfxStatus stat = kOfxStatErrUnsupported;
+ 
+-        va_list ap;
+-        va_start(ap,paramHandle);
+-        OfxStatus stat = kOfxStatErrUnsupported;
++          try {
++            stat = paramInstance->getV(ap);
++          }
++          catch(...) {}
+ 
+-        try {
+-          stat = paramInstance->getV(ap);
+-        }
+-        catch(...) {}
++          va_end(ap);
+ 
+-        va_end(ap);
++#         ifdef OFX_DEBUG_PARAMETERS
++          std::cout << ' ' << StatStr(stat) << std::endl;
++#         endif
++          return stat;
++        }
+ 
+ #       ifdef OFX_DEBUG_PARAMETERS
+-        std::cout << ' ' << StatStr(stat) << std::endl;
++        std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #       endif
+-        return stat;
++        return kOfxStatErrBadHandle;
+       }
+ 
+       /// get the param value at a time
+@@ -1888,30 +1929,29 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramGetValueAtTime - " << paramHandle << ' ' << time << " ...";
+ #       endif
+-        Instance *paramInstance = reinterpret_cast<Instance*>(paramHandle);
+-        if(!paramInstance || !paramInstance->verifyMagic()) {
+-#         ifdef OFX_DEBUG_PARAMETERS
+-          std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#         endif
+-          return kOfxStatErrBadHandle;
+-        }
++        Instance *paramInstance = instanceFromHandle(paramHandle);
++        if(paramInstance) {
++          va_list ap;
++          va_start(ap, time);
++          OfxStatus stat = kOfxStatErrUnsupported;
+ 
++          try {
++            stat = paramInstance->getV(time, ap);
++          }
++          catch(...) {}
+ 
+-        va_list ap;
+-        va_start(ap, time);
+-        OfxStatus stat = kOfxStatErrUnsupported;
++          va_end(ap);
+ 
+-        try {
+-          stat = paramInstance->getV(time, ap);
++#         ifdef OFX_DEBUG_PARAMETERS
++          std::cout << ' ' << StatStr(stat) << std::endl;
++#         endif
++          return stat;
+         }
+-        catch(...) {}
+-
+-        va_end(ap);
+ 
+ #       ifdef OFX_DEBUG_PARAMETERS
+-        std::cout << ' ' << StatStr(stat) << std::endl;
++        std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #       endif
+-        return stat;
++        return kOfxStatErrBadHandle;
+       }
+       
+       /// get the param's derivative at the given time
+@@ -1922,29 +1962,29 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramGetDerivative - " << paramHandle << ' ' << time << " ...";
+ #       endif
+-        Instance *paramInstance = reinterpret_cast<Instance*>(paramHandle);
+-        if(!paramInstance || !paramInstance->verifyMagic()) {
+-#         ifdef OFX_DEBUG_PARAMETERS
+-          std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#         endif
+-          return kOfxStatErrBadHandle;
+-        }
++        Instance *paramInstance = instanceFromHandle(paramHandle);
++        if(paramInstance) {
++          va_list ap;
++          va_start(ap, time);
++          OfxStatus stat = kOfxStatErrUnsupported;
+ 
+-        va_list ap;
+-        va_start(ap, time);
+-        OfxStatus stat = kOfxStatErrUnsupported;
++          try {
++            stat = paramInstance->deriveV(time, ap);
++          }
++          catch(...) {}
+ 
+-        try {
+-          stat = paramInstance->deriveV(time, ap);
+-        }
+-        catch(...) {}
++          va_end(ap);
+ 
+-        va_end(ap);
++#         ifdef OFX_DEBUG_PARAMETERS
++          std::cout << ' ' << StatStr(stat) << std::endl;
++#         endif
++          return stat;
++        }
+ 
+ #       ifdef OFX_DEBUG_PARAMETERS
+-        std::cout << ' ' << StatStr(stat) << std::endl;
++        std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #       endif
+-        return stat;
++        return kOfxStatErrBadHandle;
+       }
+ 
+       static OfxStatus paramGetIntegral(OfxParamHandle  paramHandle,
+@@ -1954,40 +1994,40 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramGetIntegral - " << paramHandle << ' ' << time1 << ' ' << time2 << " ...";
+ #       endif
+-        Instance *paramInstance = reinterpret_cast<Instance*>(paramHandle);
+-        if(!paramInstance || !paramInstance->verifyMagic()) {
+-#         ifdef OFX_DEBUG_PARAMETERS
+-          std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#         endif
+-          return kOfxStatErrBadHandle;
+-        }
++        Instance *paramInstance = instanceFromHandle(paramHandle);
++        if(paramInstance) {
++          va_list ap;
++          va_start(ap, time2);
++          OfxStatus stat = kOfxStatErrUnsupported;
+ 
+-        va_list ap;
+-        va_start(ap, time2);
+-        OfxStatus stat = kOfxStatErrUnsupported;
++          try {
++            stat = paramInstance->integrateV(time1, time2, ap);
++          }
++          catch(...) {}
+ 
+-        try {
+-          stat = paramInstance->integrateV(time1, time2, ap);
+-        }
+-        catch(...) {}
++          va_end(ap);
+ 
+-        va_end(ap);
++#         ifdef OFX_DEBUG_PARAMETERS
++          std::cout << ' ' << StatStr(stat) << std::endl;
++#         endif
++          return stat;
++        }
+ 
+ #       ifdef OFX_DEBUG_PARAMETERS
+-        std::cout << ' ' << StatStr(stat) << std::endl;
++        std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #       endif
+-        return stat;
++        return kOfxStatErrBadHandle;
+       }
+ 
+-      /// set the param's value at the 'current' time
++        /// set the param's value at the 'current' time
+       static OfxStatus paramSetValue(OfxParamHandle  paramHandle,
+                                      ...) 
+       {
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramSetValue - " << paramHandle << ' ';
+ #       endif
+-        Instance *paramInstance = reinterpret_cast<Instance*>(paramHandle);
+-        if(!paramInstance || !paramInstance->verifyMagic()) {
++        Instance *paramInstance = instanceFromHandle(paramHandle);
++        if(!paramInstance) {
+ #         ifdef OFX_DEBUG_PARAMETERS
+           std::cout << " ... " << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #         endif
+@@ -2006,7 +2046,9 @@
+         va_end(ap);
+ 
+         if (stat == kOfxStatOK) {
+-          paramInstance->getParamSetInstance()->paramChangedByPlugin(paramInstance);
++          Param::SetInstance *pset = paramInstance->getParamSetInstance();
++          if( pset )
++            pset->paramChangedByPlugin(paramInstance);
+         }
+ 
+ #       ifdef OFX_DEBUG_PARAMETERS
+@@ -2024,8 +2066,8 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramSetValueAtTime - " << paramHandle << ' ' << time << ' ';
+ #       endif
+-        Instance *paramInstance = reinterpret_cast<Instance*>(paramHandle);
+-        if(!paramInstance || !paramInstance->verifyMagic()) {
++        Instance *paramInstance = instanceFromHandle(paramHandle);
++        if(!paramInstance) {
+ #         ifdef OFX_DEBUG_PARAMETERS
+           std::cout << " ... " << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #         endif
+@@ -2044,7 +2086,9 @@
+         va_end(ap);
+ 
+         if (stat == kOfxStatOK) {
+-          paramInstance->getParamSetInstance()->paramChangedByPlugin(paramInstance);
++          Param::SetInstance *pset = paramInstance->getParamSetInstance();
++          if( pset )
++            pset->paramChangedByPlugin(paramInstance);
+         }
+ 
+ #       ifdef OFX_DEBUG_PARAMETERS
+@@ -2059,9 +2103,8 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramGetNumKeys - " << paramHandle << " ...";
+ #       endif
+-        Param::Instance *pInstance = reinterpret_cast<Param::Instance*>(paramHandle);
+-
+-        if (!pInstance || !pInstance->verifyMagic()) {
++        Instance *pInstance = instanceFromHandle(paramHandle);
++        if (!pInstance) {
+ #         ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #         endif
+@@ -2092,12 +2135,11 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramGetKeyTime - " << paramHandle << " ...";
+ #       endif
+-        Param::Instance *pInstance = reinterpret_cast<Param::Instance*>(paramHandle);
+-
+-        if (!pInstance || !pInstance->verifyMagic()) {
+-#       ifdef OFX_DEBUG_PARAMETERS
++        Instance *pInstance = instanceFromHandle(paramHandle);
++        if (!pInstance) {
++#         ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#       endif
++#         endif
+           return kOfxStatErrBadHandle;
+         }
+ 
+@@ -2123,9 +2165,8 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramGetKeyIndex - " << paramHandle << " ...";
+ #       endif
+-        Param::Instance *pInstance = reinterpret_cast<Param::Instance*>(paramHandle);
+-
+-        if (!pInstance || !pInstance->verifyMagic()) {
++        Instance *pInstance = instanceFromHandle(paramHandle);
++        if (!pInstance) {
+ #         ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #         endif
+@@ -2134,9 +2175,9 @@
+ 
+         KeyframeParam *paramInstance = dynamic_cast<KeyframeParam*>(pInstance);
+         if(!paramInstance) {
+-#         ifdef OFX_DEBUG_PARAMETERS
++#       ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#         endif
++#       endif
+           return kOfxStatErrBadHandle;
+         }
+         OfxStatus stat = paramInstance->getKeyIndex(time,direction,*index);
+@@ -2152,9 +2193,8 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramDeleteKey - " << paramHandle << " ...";
+ #       endif
+-        Param::Instance *pInstance = reinterpret_cast<Param::Instance*>(paramHandle);
+-
+-        if (!pInstance || !pInstance->verifyMagic()) {
++        Instance *pInstance = instanceFromHandle(paramHandle);
++        if (!pInstance) {
+ #         ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #         endif
+@@ -2163,9 +2203,9 @@
+ 
+         KeyframeParam *paramInstance = dynamic_cast<KeyframeParam*>(pInstance);
+         if(!paramInstance) {
+-#         ifdef OFX_DEBUG_PARAMETERS
++#       ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#         endif
++#       endif
+           return kOfxStatErrBadHandle;
+         }
+         OfxStatus stat = paramInstance->deleteKey(time);
+@@ -2180,9 +2220,8 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramDeleteAllKeys - " << paramHandle << " ...";
+ #       endif
+-        Param::Instance *pInstance = reinterpret_cast<Param::Instance*>(paramHandle);
+-        
+-        if (!pInstance || !pInstance->verifyMagic()) {
++        Instance *pInstance = instanceFromHandle(paramHandle);
++        if (!pInstance) {
+ #         ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #         endif
+@@ -2191,9 +2230,9 @@
+ 
+         KeyframeParam *paramInstance = dynamic_cast<KeyframeParam*>(pInstance);
+         if(!paramInstance) {
+-#         ifdef OFX_DEBUG_PARAMETERS
++#       ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+-#         endif
++#       endif
+           return kOfxStatErrBadHandle;
+         }
+         OfxStatus stat = paramInstance->deleteAllKeys();
+@@ -2210,11 +2249,10 @@
+ #       ifdef OFX_DEBUG_PARAMETERS
+         std::cout << "OFX: paramCopy - " << paramTo << " ...";
+ #       endif
+-        Instance *paramInstanceTo = reinterpret_cast<Instance*>(paramTo);
+-        Instance *paramInstanceFrom = reinterpret_cast<Instance*>(paramFrom);        
++        Instance *paramInstanceTo = instanceFromHandle(paramTo);
++        Instance *paramInstanceFrom = instanceFromHandle(paramFrom);        
+ 
+-        if(!paramInstanceTo || !paramInstanceTo->verifyMagic() ||
+-           !paramInstanceFrom || !paramInstanceFrom->verifyMagic()) {
++        if(!paramInstanceTo || !paramInstanceFrom) {
+ #         ifdef OFX_DEBUG_PARAMETERS
+           std::cout << ' ' << StatStr(kOfxStatErrBadHandle) << std::endl;
+ #         endif

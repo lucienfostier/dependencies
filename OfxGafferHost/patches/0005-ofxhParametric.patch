@@ -1,0 +1,348 @@
+# OfxGafferHost: Parametric param support (ColorLookup)
+# Why: net.sf.openfx.ColorLookupPlugin uses kOfxParamTypeParametric (5 dimensions, lookupTable curves). Stock 1.5s HostSupport has no ParametricInstance and returns NULL from newParam() for parametric type, causing createInstance to fail and fetchSuite to return NULL.
+# Technical: Add HostSupport/include/ofxhParametricParam.h + OFX::Host::ParametricParam::GetSuite, extend ofxhParam.h with ParametricInstance class (Instance subclass, m_curves vector-of-vectors, virtual dispatch overrides for getValue/getNControlPoints etc. with piecewise-linear evaluate, sorted insert). Add OfxParametricParameterSuiteV1 gParametricParameterSuite with 7 funcs. Descriptor-handle->curves map for describe-time addControlPoint when no Instance yet (g_handleToCurves + mutex), instance handles via existing registry. Suite func order matches SDK. Requires -DOFX_SUPPORTS_PARAMETRIC and header copy in config.py.
+--- a/HostSupport/include/ofxhParam.h
++++ b/HostSupport/include/ofxhParam.h
+@@ -12,6 +12,9 @@
+ 
+ //ofx
+ #include "ofxParam.h"
++#ifdef OFX_SUPPORTS_PARAMETRIC
++#include "ofxParametricParam.h"
++#endif
+ 
+ //ofxh
+ #include "ofxhPropertySuite.h"
+@@ -614,6 +617,33 @@
+         PushbuttonInstance(Descriptor& descriptor, Param::SetInstance* instance = 0) : Instance(descriptor,instance) {}
+       };
+ 
++#ifdef OFX_SUPPORTS_PARAMETRIC
++      /// A parametric parameter - represents 'functions' that the plug-in can
++      /// ask the host to evaluate at arbitrary positions (e.g. lookup tables).
++      /// The plug-in may also edit the curves through the parametric suite.
++      class ParametricInstance : public Instance {
++      public:
++        ParametricInstance(Descriptor& descriptor, Param::SetInstance* instance = 0);
++
++        int getDimension() const { return (int)m_curves.size(); }
++        const std::vector<std::vector<std::pair<double,double> > > &curves() const { return m_curves; }
++
++        /// Dispatch points for the parametric suite - derived hosts may
++        /// override these to back the curves with their own storage.
++        virtual OfxStatus getValue(int curveIndex, double time, double parametricPosition, double *returnValue);
++        virtual OfxStatus getNControlPoints(int curveIndex, double time, int *count);
++        virtual OfxStatus getNthControlPoint(int curveIndex, double time, int nthCtl, double *key, double *value);
++        virtual OfxStatus setNthControlPoint(int curveIndex, double time, int nthCtl, double key, double value, bool addAnimationKey);
++        virtual OfxStatus addControlPoint(int curveIndex, double time, double key, double value, bool addAnimationKey);
++        virtual OfxStatus deleteControlPoint(int curveIndex, int nthCtl);
++        virtual OfxStatus deleteAllControlPoints(int curveIndex);
++
++      private:
++        /// one curve per dimension, control points sorted by key
++        std::vector<std::vector<std::pair<double,double> > > m_curves;
++      };
++#endif
++
+       /// A set of parameters
+       ///
+       /// As we are the owning object we delete the params inside ourselves. It was tempting
+--- a/HostSupport/src/ofxhParam.cpp
++++ b/HostSupport/src/ofxhParam.cpp
+@@ -20,6 +20,8 @@
+ #include <float.h>
+ #include <limits.h>
+ #include <stdarg.h>
++#include <algorithm>
++#include <cmath>
+ 
+ #include <unordered_map>
+ #include <mutex>
+@@ -2332,8 +2334,256 @@
+         return NULL;
+       }
+ 
++
++#ifdef OFX_SUPPORTS_PARAMETRIC
++
++      ////////////////////////////////////////////////////////////////////////////////
++      // Parametric parameter suite
++
++      // During DescribeInContext the plug-in adds control points to *descriptor*
++      // handles (no Instance exists yet). Curves are keyed by raw handle so both
++      // descriptor and instance handles resolve; ParametricInstance copies the
++      // descriptor curves as its defaults.
++      static std::unordered_map<const void*, std::vector<std::vector<std::pair<double,double> > > > g_handleToCurves;
++      static std::mutex g_curvesMutex;
++
++      static void setIdentityCurve(std::vector<std::pair<double,double> > &curve)
++      {
++        curve.clear();
++        curve.push_back(std::make_pair(0.0, 0.0));
++        curve.push_back(std::make_pair(1.0, 1.0));
++      }
++
++      static std::vector<std::pair<double,double> > &curveForIndex(std::vector<std::vector<std::pair<double,double> > > &curves, int index)
++      {
++        if(index < 0) index = 0;
++        if((int)curves.size() <= index) curves.resize(index + 1);
++        if(curves[index].empty()) setIdentityCurve(curves[index]);
++        return curves[index];
++      }
++
++      static double evaluateCurveAt(const std::vector<std::pair<double,double> > &curve, double position)
++      {
++        if(curve.empty()) return position;
++        if(curve.size() == 1) return curve.front().second;
++        if(position <= curve.front().first) return curve.front().second;
++        if(position >= curve.back().first) return curve.back().second;
++        for(size_t i = 1; i < curve.size(); ++i) {
++          if(position <= curve[i].first) {
++            const double x0 = curve[i-1].first, y0 = curve[i-1].second;
++            const double x1 = curve[i].first, y1 = curve[i].second;
++            const double t = (x1 != x0) ? (position - x0) / (x1 - x0) : 0.0;
++            return y0 + t * (y1 - y0);
++          }
++        }
++        return curve.back().second;
++      }
++
++      static void insertControlPoint(std::vector<std::pair<double,double> > &curve, double key, double value)
++      {
++        for(size_t i = 0; i < curve.size(); ++i) {
++          if(fabs(curve[i].first - key) < 1e-6) { curve[i].second = value; return; }
++        }
++        curve.push_back(std::make_pair(key, value));
++        std::sort(curve.begin(), curve.end());
++      }
++
++      /// Instance path of the suite: resolves the handle through the
++      /// instance registry, falling back to the raw-handle curve storage
++      /// for descriptor handles used during DescribeInContext.
++      static ParametricInstance *parametricFromHandle(OfxParamHandle handle)
++      {
++        Instance *inst = instanceFromHandle(handle);
++        return inst ? dynamic_cast<ParametricInstance *>(inst) : 0;
++      }
++
++      static OfxStatus parametricGetValue(OfxParamHandle param, int curveIndex, double time, double parametricPosition, double *returnValue)
++      {
++        if(!returnValue) return kOfxStatErrBadHandle;
++        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->getValue(curveIndex, time, parametricPosition, returnValue);
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        std::unordered_map<const void*, std::vector<std::vector<std::pair<double,double> > > >::const_iterator it = g_handleToCurves.find(param);
++        if(it == g_handleToCurves.end()) { *returnValue = parametricPosition; return kOfxStatOK; }
++        if(curveIndex < 0 || curveIndex >= (int)it->second.size()) return kOfxStatErrBadIndex;
++        *returnValue = evaluateCurveAt(it->second[curveIndex], parametricPosition);
++        return kOfxStatOK;
++      }
++
++      static OfxStatus parametricGetNControlPoints(OfxParamHandle param, int curveIndex, double time, int *count)
++      {
++        if(!count) return kOfxStatErrBadHandle;
++        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->getNControlPoints(curveIndex, time, count);
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        std::unordered_map<const void*, std::vector<std::vector<std::pair<double,double> > > >::const_iterator it = g_handleToCurves.find(param);
++        *count = (it != g_handleToCurves.end() && curveIndex >= 0 && curveIndex < (int)it->second.size()) ? (int)it->second[curveIndex].size() : 0;
++        return kOfxStatOK;
++      }
++
++      static OfxStatus parametricGetNthControlPoint(OfxParamHandle param, int curveIndex, double time, int nthCtl, double *key, double *value)
++      {
++        if(!key || !value) return kOfxStatErrBadHandle;
++        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->getNthControlPoint(curveIndex, time, nthCtl, key, value);
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        std::unordered_map<const void*, std::vector<std::vector<std::pair<double,double> > > >::const_iterator it = g_handleToCurves.find(param);
++        if(it == g_handleToCurves.end() || curveIndex < 0 || curveIndex >= (int)it->second.size()) return kOfxStatErrBadIndex;
++        if(nthCtl < 0 || nthCtl >= (int)it->second[curveIndex].size()) return kOfxStatErrBadIndex;
++        *key = it->second[curveIndex][nthCtl].first;
++        *value = it->second[curveIndex][nthCtl].second;
++        return kOfxStatOK;
++      }
++
++      static OfxStatus parametricSetNthControlPoint(OfxParamHandle param, int curveIndex, double time, int nthCtl, double key, double value, bool addAnimationKey)
++      {
++        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->setNthControlPoint(curveIndex, time, nthCtl, key, value, addAnimationKey);
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        std::vector<std::vector<std::pair<double,double> > > &curves = g_handleToCurves[param];
++        std::vector<std::pair<double,double> > &curve = curveForIndex(curves, curveIndex);
++        if(nthCtl < 0 || nthCtl >= (int)curve.size()) return kOfxStatErrBadIndex;
++        curve.erase(curve.begin() + nthCtl);
++        insertControlPoint(curve, key, value);
++        return kOfxStatOK;
++      }
++
++      static OfxStatus parametricAddControlPoint(OfxParamHandle param, int curveIndex, double time, double key, double value, bool addAnimationKey)
++      {
++        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->addControlPoint(curveIndex, time, key, value, addAnimationKey);
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        insertControlPoint(curveForIndex(g_handleToCurves[param], curveIndex), key, value);
++        return kOfxStatOK;
++      }
++
++      static OfxStatus parametricDeleteControlPoint(OfxParamHandle param, int curveIndex, int nthCtl)
++      {
++        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->deleteControlPoint(curveIndex, nthCtl);
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        std::unordered_map<const void*, std::vector<std::vector<std::pair<double,double> > > >::iterator it = g_handleToCurves.find(param);
++        if(it == g_handleToCurves.end() || curveIndex < 0 || curveIndex >= (int)it->second.size()) return kOfxStatErrBadIndex;
++        std::vector<std::pair<double,double> > &curve = it->second[curveIndex];
++        if(nthCtl < 0 || nthCtl >= (int)curve.size()) return kOfxStatErrBadIndex;
++        curve.erase(curve.begin() + nthCtl);
++        return kOfxStatOK;
++      }
++
++      static OfxStatus parametricDeleteAllControlPoints(OfxParamHandle param, int curveIndex)
++      {
++        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->deleteAllControlPoints(curveIndex);
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        std::unordered_map<const void*, std::vector<std::vector<std::pair<double,double> > > >::iterator it = g_handleToCurves.find(param);
++        if(it == g_handleToCurves.end() || curveIndex < 0 || curveIndex >= (int)it->second.size()) return kOfxStatErrBadIndex;
++        it->second[curveIndex].clear();
++        return kOfxStatOK;
++      }
++
++      static const OfxParametricParameterSuiteV1 gParametricParameterSuite = {
++        parametricGetValue,
++        parametricGetNControlPoints,
++        parametricGetNthControlPoint,
++        parametricSetNthControlPoint,
++        parametricAddControlPoint,
++        parametricDeleteControlPoint,
++        parametricDeleteAllControlPoints
++      };
++
++      ////////////////////////////////////////////////////////////////////////////////
++      // ParametricInstance
++
++      ParametricInstance::ParametricInstance(Descriptor& descriptor, Param::SetInstance* instance) : Instance(descriptor, instance)
++      {
++        int dimension = 1;
++        try { dimension = descriptor.getProperties().getIntProperty(kOfxParamPropParametricDimension); } catch(...) {}
++        if(dimension < 1) dimension = 1;
++
++        m_curves.assign((size_t)dimension, std::vector<std::pair<double,double> >());
++        for(size_t i = 0; i < m_curves.size(); ++i) setIdentityCurve(m_curves[i]);
++
++        // Per the spec, curves set on the descriptor during DescribeInContext
++        // become the defaults of newly created instances.
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        std::unordered_map<const void*, std::vector<std::vector<std::pair<double,double> > > >::const_iterator it = g_handleToCurves.find(&descriptor);
++        if(it != g_handleToCurves.end() && !it->second.empty()) {
++          m_curves = it->second;
++          m_curves.resize((size_t)dimension);
++          for(size_t i = 0; i < m_curves.size(); ++i) if(m_curves[i].empty()) setIdentityCurve(m_curves[i]);
++        }
++      }
++
++      OfxStatus ParametricInstance::getValue(int curveIndex, double time, double parametricPosition, double *returnValue)
++      {
++        if(!returnValue) return kOfxStatErrBadHandle;
++        if(curveIndex < 0 || curveIndex >= (int)m_curves.size()) return kOfxStatErrBadIndex;
++        *returnValue = evaluateCurveAt(m_curves[curveIndex], parametricPosition);
++        return kOfxStatOK;
++      }
++
++      OfxStatus ParametricInstance::getNControlPoints(int curveIndex, double time, int *count)
++      {
++        if(!count) return kOfxStatErrBadHandle;
++        if(curveIndex < 0 || curveIndex >= (int)m_curves.size()) return kOfxStatErrBadIndex;
++        *count = (int)m_curves[curveIndex].size();
++        return kOfxStatOK;
++      }
++
++      OfxStatus ParametricInstance::getNthControlPoint(int curveIndex, double time, int nthCtl, double *key, double *value)
++      {
++        if(!key || !value) return kOfxStatErrBadHandle;
++        if(curveIndex < 0 || curveIndex >= (int)m_curves.size()) return kOfxStatErrBadIndex;
++        const std::vector<std::pair<double,double> > &curve = m_curves[curveIndex];
++        if(nthCtl < 0 || nthCtl >= (int)curve.size()) return kOfxStatErrBadIndex;
++        *key = curve[nthCtl].first;
++        *value = curve[nthCtl].second;
++        return kOfxStatOK;
++      }
++
++      OfxStatus ParametricInstance::setNthControlPoint(int curveIndex, double time, int nthCtl, double key, double value, bool /*addAnimationKey*/)
++      {
++        if(curveIndex < 0 || curveIndex >= (int)m_curves.size()) return kOfxStatErrBadIndex;
++        std::vector<std::pair<double,double> > &curve = m_curves[curveIndex];
++        if(nthCtl < 0 || nthCtl >= (int)curve.size()) return kOfxStatErrBadIndex;
++        // remove the old point then reinsert, so the curve stays sorted if the key moves
++        curve.erase(curve.begin() + nthCtl);
++        insertControlPoint(curve, key, value);
++        return kOfxStatOK;
++      }
++
++      OfxStatus ParametricInstance::addControlPoint(int curveIndex, double time, double key, double value, bool /*addAnimationKey*/)
++      {
++        if(curveIndex < 0 || curveIndex >= (int)m_curves.size()) return kOfxStatErrBadIndex;
++        insertControlPoint(m_curves[curveIndex], key, value);
++        return kOfxStatOK;
++      }
++
++      OfxStatus ParametricInstance::deleteControlPoint(int curveIndex, int nthCtl)
++      {
++        if(curveIndex < 0 || curveIndex >= (int)m_curves.size()) return kOfxStatErrBadIndex;
++        std::vector<std::pair<double,double> > &curve = m_curves[curveIndex];
++        if(nthCtl < 0 || nthCtl >= (int)curve.size()) return kOfxStatErrBadIndex;
++        curve.erase(curve.begin() + nthCtl);
++        return kOfxStatOK;
++      }
++
++      OfxStatus ParametricInstance::deleteAllControlPoints(int curveIndex)
++      {
++        if(curveIndex < 0 || curveIndex >= (int)m_curves.size()) return kOfxStatErrBadIndex;
++        m_curves[curveIndex].clear();
++        return kOfxStatOK;
++      }
++
++#endif // OFX_SUPPORTS_PARAMETRIC
++
+     } // Param
+ 
++
++#ifdef OFX_SUPPORTS_PARAMETRIC
++  namespace ParametricParam {
++    const void *GetSuite(int suiteVersion)
++    {
++      if(suiteVersion == 1)
++        return (void *)&Param::gParametricParameterSuite;
++      return 0;
++    }
++  } // ParametricParam
++#endif
++
+   } // Host
+ 
+ } // OFX
+--- /dev/null
++++ b/HostSupport/include/ofxhParametricParam.h
+@@ -0,0 +1,28 @@
++// Copyright OpenFX and contributors to the OpenFX project.
++// SPDX-License-Identifier: BSD-3-Clause
++
++/** @file ofxhParametricParam.h
++ *
++ * Host-side support for the optional OFX parametric parameter suite.
++ * This file is referenced (but not shipped) by the OpenFX SDK sources,
++ * and provides the suite entry point used by the host's fetchSuite.
++ */
++
++#pragma once
++
++#include "ofxCore.h"
++
++namespace OFX {
++
++  namespace Host {
++
++    /// Suite fetcher for the parametric parameter suite.
++    /// Returns a pointer to the suite struct for the requested version,
++    /// or NULL if the version is not supported.
++    namespace ParametricParam {
++      const void *GetSuite(int suiteVersion);
++    }
++
++  } // Host
++
++} // OFX
