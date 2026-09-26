@@ -253,6 +253,30 @@ def __loadConfigs( variables, variants ) :
 
 	return configs
 
+def __applyPatch( patch ) :
+
+	# Patches are written relative to the source tree they target, which is
+	# not always the project working directory (e.g. OfxMiscPlugins patches
+	# touch both the SDK tree and the sibling openfx-misc tree, and GNU patch
+	# refuses `..` in paths). Probe each candidate tree with --dry-run and
+	# apply in the first one where the patch fits. One patch must target a
+	# single tree; mixed-tree patches fail everywhere and raise below.
+	candidates = [ os.getcwd() ] + sorted( glob.glob( "../openfx-*" ) )
+	for targetDir in candidates :
+		probe = subprocess.run(
+			"patch -p1 --dry-run --silent < {patch}".format( patch = patch ),
+			shell = True, cwd = targetDir, stdin = subprocess.DEVNULL,
+			stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL
+		)
+		if probe.returncode == 0 :
+			subprocess.check_call(
+				"patch -p1 < {patch}".format( patch = patch ),
+				shell = True, cwd = targetDir
+			)
+			return
+
+	raise RuntimeError( "Patch does not apply in any candidate tree : {}".format( patch ) )
+
 def __preserveCurrentDirectory( f ) :
 
 	@functools.wraps( f )
@@ -311,8 +335,10 @@ def __buildProject( project, config, buildDir, cleanup ) :
 				shutil.rmtree( licenseDest )
 			shutil.copytree( config["license"], licenseDest )
 
-	for patch in glob.glob( "../../patches/*.patch" ) :
-		subprocess.check_call( "patch -p1 < {patch}".format( patch = patch ), shell = True )
+	# Sorted: numeric prefixes express patch dependencies (e.g. a later
+	# patch touching a SUBDIRS line added by an earlier one).
+	for patch in sorted( glob.glob( "../../patches/*.patch" ) ) :
+		__applyPatch( os.path.abspath( patch ) )
 
 	environment = os.environ.copy()
 	for k, v in config.get( "environment", {} ).items() :
