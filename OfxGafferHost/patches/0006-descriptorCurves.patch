@@ -1,0 +1,39 @@
+# OfxGafferHost: Descriptor curves accessor for parametric plug setup
+# Why: ParamAlgo::setupPlug needs described parametric defaults before any instance exists (ColorCorrect non-identity). g_handleToCurves is populated during DescribeInContext keyed by descriptor handle, but no accessor existed.
+# Technical: Add OFX::Host::Param::getDescriptorCurves(const void*, vector<vector<pair<double,double>>>&) in ofxhParam.h/.cpp (OFX_SUPPORTS_PARAMETRIC guard). Locks g_curvesMutex, copies g_handleToCurves[handle] if present. Used by GafferOFX ParamAlgo for RampffPlug defaults.
+--- a/HostSupport/include/ofxhParam.h
++++ b/HostSupport/include/ofxhParam.h
+@@ -642,6 +642,12 @@
+         /// one curve per dimension, control points sorted by key
+         std::vector<std::vector<std::pair<double,double> > > m_curves;
+       };
++
++      /// Query described curves for a param descriptor handle (for
++      /// descriptor-driven plug setup before any instance exists).
++      /// Returns true and fills curves if described, false otherwise.
++      /// Curves are sorted by key, one vector per dimension.
++      bool getDescriptorCurves( const void *descriptorHandle, std::vector<std::vector<std::pair<double,double> > > &curves );
+ #endif
+ 
+       /// A set of parameters
+--- a/HostSupport/src/ofxhParam.cpp
++++ b/HostSupport/src/ofxhParam.cpp
+@@ -2568,6 +2568,18 @@
+         return kOfxStatOK;
+       }
+ 
++      bool getDescriptorCurves( const void *descriptorHandle, std::vector<std::vector<std::pair<double,double> > > &curves )
++      {
++        std::lock_guard<std::mutex> lock(g_curvesMutex);
++        std::unordered_map<const void*, std::vector<std::vector<std::pair<double,double> > > >::const_iterator it = g_handleToCurves.find(descriptorHandle);
++        if( it == g_handleToCurves.end() || it->second.empty() )
++        {
++          return false;
++        }
++        curves = it->second;
++        return true;
++      }
++
+ #endif // OFX_SUPPORTS_PARAMETRIC
+ 
+     } // Param
