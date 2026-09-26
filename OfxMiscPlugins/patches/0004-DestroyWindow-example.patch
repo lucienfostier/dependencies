@@ -1,0 +1,269 @@
+# DestroyWindow destroy-dispatch probe (GafferOFX test fixture)
+# Why: no shipped plugin issues param suite calls during kOfxActionDestroyInstance, so the host destroy ordering (dispatch while registered, then unregister) has no coverage. This minimal filter effect reads an Int param at destroy time and writes the value to a probe file, letting GafferOFXTest assert instance (not descriptor) dispatch.
+# Technical: new Examples/DestroyWindow (Makefile + Info.plist + destroy_window.cpp) following the BoxBlur precedent; SUBDIRS entry. Built by the existing Examples make invocation and installed by the existing bundle cp glob. Plugin id com.gaffer.DestroyWindow.
+--- a/Examples/DestroyWindow/destroy_window.cpp
++++ b/Examples/DestroyWindow/destroy_window.cpp
+@@ -0,0 +1,225 @@
++/* Minimal OFX test plugin: exercises param suite dispatch during
++ * kOfxActionDestroyInstance. On destroy it reads its "testValue" Int
++ * param and writes "<value> status=<stat>" to a probe file. The host
++ * must dispatch to the live instance (plug value) rather than the
++ * descriptor (default) or an error.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "ofxCore.h"
++#include "ofxImageEffect.h"
++#include "ofxParam.h"
++
++/* Probe path override for tests (unique per run). */
++static const char *probePath( void )
++{
++	const char *env = getenv( "OFX_DESTROY_WINDOW_PROBE" );
++	return env && env[0] ? env : "/tmp/ofx_destroy_window_probe";
++}
++
++static OfxHost *g_host = NULL;
++
++static void *fetchSuite( const char *name, int version )
++{
++	if( !g_host || !g_host->fetchSuite )
++	{
++		return NULL;
++	}
++	return (void *)g_host->fetchSuite( g_host->host, name, version );
++}
++
++typedef struct
++{
++	OfxParamHandle testValue;
++} InstanceData;
++
++static OfxStatus describe( OfxImageEffectHandle effect )
++{
++	OfxPropertySetHandle props = NULL;
++	OfxImageEffectSuiteV1 *effectSuite = (OfxImageEffectSuiteV1 *)fetchSuite( kOfxImageEffectSuite, 1 );
++	if( !effectSuite || effectSuite->getPropertySet( effect, &props ) != kOfxStatOK )
++	{
++		return kOfxStatFailed;
++	}
++	OfxPropertySuiteV1 *propSuite = (OfxPropertySuiteV1 *)fetchSuite( kOfxPropertySuite, 1 );
++	if( !propSuite )
++	{
++		return kOfxStatFailed;
++	}
++	propSuite->propSetString( props, kOfxPropLabel, 0, "DestroyWindow" );
++	propSuite->propSetString( props, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter );
++	propSuite->propSetString( props, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat );
++	propSuite->propSetString( props, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA );
++	propSuite->propSetInt( props, kOfxImageEffectPropSupportsTiles, 0, 1 );
++	return kOfxStatOK;
++}
++
++static OfxStatus describeInContext( OfxImageEffectHandle effect )
++{
++	OfxImageEffectSuiteV1 *effectSuite = (OfxImageEffectSuiteV1 *)fetchSuite( kOfxImageEffectSuite, 1 );
++	OfxParameterSuiteV1 *paramSuite = (OfxParameterSuiteV1 *)fetchSuite( kOfxParameterSuite, 1 );
++	OfxPropertySuiteV1 *propSuite = (OfxPropertySuiteV1 *)fetchSuite( kOfxPropertySuite, 1 );
++	if( !effectSuite || !paramSuite || !propSuite )
++	{
++		return kOfxStatFailed;
++	}
++
++	OfxParamSetHandle paramSet = NULL;
++	if( effectSuite->getParamSet( effect, &paramSet ) != kOfxStatOK )
++	{
++		return kOfxStatFailed;
++	}
++
++	/* Source clip (Output is implicit). */
++	OfxPropertySetHandle clipProps = NULL;
++	if( effectSuite->clipDefine( effect, kOfxImageEffectSimpleSourceClipName, &clipProps ) != kOfxStatOK )
++	{
++		return kOfxStatFailed;
++	}
++	propSuite->propSetString( clipProps, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA );
++	propSuite->propSetString( clipProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat );
++
++	/* Integer test param, default 0. */
++	OfxPropertySetHandle paramProps = NULL;
++	if( paramSuite->paramDefine( paramSet, kOfxParamTypeInteger, "testValue", &paramProps ) != kOfxStatOK )
++	{
++		return kOfxStatFailed;
++	}
++	propSuite->propSetString( paramProps, kOfxPropLabel, 0, "Test Value" );
++	propSuite->propSetInt( paramProps, kOfxParamPropDefault, 0, 0 );
++	return kOfxStatOK;
++}
++
++static OfxStatus createInstance( OfxImageEffectHandle effect )
++{
++	OfxImageEffectSuiteV1 *effectSuite = (OfxImageEffectSuiteV1 *)fetchSuite( kOfxImageEffectSuite, 1 );
++	OfxParameterSuiteV1 *paramSuite = (OfxParameterSuiteV1 *)fetchSuite( kOfxParameterSuite, 1 );
++	OfxPropertySuiteV1 *propSuite = (OfxPropertySuiteV1 *)fetchSuite( kOfxPropertySuite, 1 );
++	if( !effectSuite || !paramSuite || !propSuite )
++	{
++		return kOfxStatFailed;
++	}
++	OfxParamSetHandle paramSet = NULL;
++	if( effectSuite->getParamSet( effect, &paramSet ) != kOfxStatOK )
++	{
++		return kOfxStatFailed;
++	}
++	OfxParamHandle param = NULL;
++	if( paramSuite->paramGetHandle( paramSet, "testValue", &param, NULL ) != kOfxStatOK )
++	{
++		return kOfxStatFailed;
++	}
++	InstanceData *data = (InstanceData *)malloc( sizeof( InstanceData ) );
++	if( !data )
++	{
++		return kOfxStatErrMemory;
++	}
++	data->testValue = param;
++	OfxPropertySetHandle props = NULL;
++	if( effectSuite->getPropertySet( effect, &props ) != kOfxStatOK )
++	{
++		free( data );
++		return kOfxStatFailed;
++	}
++	propSuite->propSetPointer( props, kOfxPropInstanceData, 0, (void *)data );
++	return kOfxStatOK;
++}
++
++static OfxStatus destroyInstance( OfxImageEffectHandle effect )
++{
++	OfxImageEffectSuiteV1 *effectSuite = (OfxImageEffectSuiteV1 *)fetchSuite( kOfxImageEffectSuite, 1 );
++	OfxParameterSuiteV1 *paramSuite = (OfxParameterSuiteV1 *)fetchSuite( kOfxParameterSuite, 1 );
++	OfxPropertySuiteV1 *propSuite = (OfxPropertySuiteV1 *)fetchSuite( kOfxPropertySuite, 1 );
++	int value = -9999;
++	OfxStatus stat = kOfxStatErrBadHandle;
++	if( effectSuite && paramSuite && propSuite )
++	{
++		OfxPropertySetHandle props = NULL;
++		if( effectSuite->getPropertySet( effect, &props ) == kOfxStatOK )
++		{
++			void *dataPtr = NULL;
++			if( propSuite->propGetPointer( props, kOfxPropInstanceData, 0, &dataPtr ) == kOfxStatOK && dataPtr )
++			{
++				InstanceData *data = (InstanceData *)dataPtr;
++				stat = paramSuite->paramGetValue( data->testValue, &value );
++				free( data );
++				propSuite->propSetPointer( props, kOfxPropInstanceData, 0, NULL );
++			}
++		}
++	}
++	FILE *f = fopen( probePath(), "w" );
++	if( f )
++	{
++		fprintf( f, "%d status=%d\n", value, (int)stat );
++		fclose( f );
++	}
++	return kOfxStatOK;
++}
++
++static OfxStatus mainEntry( const char *action, const void *handle, OfxPropertySetHandle inArgs, OfxPropertySetHandle outArgs )
++{
++	if( strcmp( action, kOfxActionDescribe ) == 0 )
++	{
++		return describe( (OfxImageEffectHandle)handle );
++	}
++	if( strcmp( action, kOfxImageEffectActionDescribeInContext ) == 0 )
++	{
++		return describeInContext( (OfxImageEffectHandle)handle );
++	}
++	if( strcmp( action, kOfxActionCreateInstance ) == 0 )
++	{
++		return createInstance( (OfxImageEffectHandle)handle );
++	}
++	if( strcmp( action, kOfxActionDestroyInstance ) == 0 )
++	{
++		return destroyInstance( (OfxImageEffectHandle)handle );
++	}
++	return kOfxStatReplyDefault;
++}
++
++static void setHost( OfxHost *host )
++{
++	g_host = host;
++}
++
++#if defined __APPLE__ || defined __linux__ || defined __FreeBSD__
++#  define EXPORT __attribute__((visibility("default")))
++#elif defined _WIN32
++#  define EXPORT OfxExport
++#else
++#  error Not building on your operating system quite yet
++#endif
++
++static OfxPlugin g_plugin = {
++	kOfxImageEffectPluginApi,
++	1,
++	"com.gaffer.DestroyWindow",
++	1,
++	0,
++	setHost,
++	mainEntry
++};
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++EXPORT int OfxGetNumberOfPlugins( void )
++{
++	return 1;
++}
++
++EXPORT OfxPlugin *OfxGetPlugin( int nth )
++{
++	if( nth == 0 )
++	{
++		return &g_plugin;
++	}
++	return NULL;
++}
++
++#ifdef __cplusplus
++}
++#endif
+--- a/Examples/DestroyWindow/Info.plist
++++ b/Examples/DestroyWindow/Info.plist
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>CFBundleDevelopmentRegion</key>
++	<string>English</string>
++	<key>CFBundleExecutable</key>
++	<string>DestroyWindow.ofx</string>
++	<key>CFBundleInfoDictionaryVersion</key>
++	<string>6.0</string>
++	<key>CFBundlePackageType</key>
++	<string>BNDL</string>
++	<key>CFBundleSignature</key>
++	<string>????</string>
++	<key>CFBundleVersion</key>
++	<string>0.0.1d1</string>
++	<key>CSResourcesFileMapped</key>
++	<true/>
++</dict>
++</plist>
+--- a/Examples/DestroyWindow/Makefile
++++ b/Examples/DestroyWindow/Makefile
+@@ -0,0 +1,5 @@
++PLUGINOBJECTS = destroy_window.o
++PLUGINNAME = DestroyWindow
++PATHTOROOT = ../
++
++include ../Makefile.master
+--- a/Examples/Makefile
++++ b/Examples/Makefile
+@@ -1,4 +1,4 @@
+-SUBDIRS = Basic BoxBlur Custom DepthConverter Invert OpenGL Overlay Rectangle Test
++SUBDIRS = Basic BoxBlur Custom DestroyWindow DepthConverter Invert OpenGL Overlay Rectangle Test
+ 
+ all: subdirs
