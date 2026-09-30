@@ -57,6 +57,10 @@
 			"mkdir -p {buildDir}/doc/licenses/OfxMiscPlugins",
 			"cp ../openfx-misc/LICENSE {buildDir}/doc/licenses/OfxMiscPlugins/",
 			"cp ../CImg-*/Licence_CeCILL_V2-en.txt {buildDir}/doc/licenses/OfxMiscPlugins/CImg-Licence_CeCILL_V2-en.txt",
+			# The build links ofxsupportext objects: ship its GPL text too.
+			# (The OpenFX SDK text already ships via the OpenFX project.)
+			"mkdir -p {buildDir}/doc/licenses/OfxSupportExt",
+			"cp ../openfx-supportext/LICENSE {buildDir}/doc/licenses/OfxSupportExt/",
 
 		],
 
