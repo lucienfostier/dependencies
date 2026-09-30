@@ -262,16 +262,20 @@ def __applyPatch( patch ) :
 	# apply in the first one where the patch fits. One patch must target a
 	# single tree; mixed-tree patches fail everywhere and raise below.
 	candidates = [ os.getcwd() ] + sorted( glob.glob( "../openfx-*" ) )
+	# No shell: checkout paths may contain spaces, which an unquoted
+	# redirect would split. Pass the patch bytes as stdin instead.
+	with open( patch, "rb" ) as patchFile :
+		patchData = patchFile.read()
 	for targetDir in candidates :
 		probe = subprocess.run(
-			"patch -p1 --dry-run --silent < {patch}".format( patch = patch ),
-			shell = True, cwd = targetDir, stdin = subprocess.DEVNULL,
+			[ "patch", "-p1", "--dry-run", "--silent" ],
+			shell = False, cwd = targetDir, input = patchData,
 			stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL
 		)
 		if probe.returncode == 0 :
-			subprocess.check_call(
-				"patch -p1 < {patch}".format( patch = patch ),
-				shell = True, cwd = targetDir
+			subprocess.run(
+				[ "patch", "-p1" ],
+				shell = False, cwd = targetDir, input = patchData, check = True
 			)
 			return
 
