@@ -242,11 +242,11 @@ diff -ruN a/Examples/BoxBlur/boxblur.cpp b/Examples/BoxBlur/boxblur.cpp
 +  gEffectHost->getPropertySet(effect, &effectProps);
 +
 +  gPropHost->propSetInt(effectProps, kOfxImageEffectPluginPropFieldRenderTwiceAlways, 0, 0);
-+  gPropHost->propSetInt(effectProps, kOfxImageEffectPropSupportsMultipleClipDepths, 0, 1);
++  // Float only: render() casts buffers to float/OfxRGBAColourF, so
++  // advertising byte/short would misread pixel storage. Single depth.
++  gPropHost->propSetInt(effectProps, kOfxImageEffectPropSupportsMultipleClipDepths, 0, 0);
 +
-+  gPropHost->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthByte);
-+  gPropHost->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 1, kOfxBitDepthShort);
-+  gPropHost->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 2, kOfxBitDepthFloat);
++  gPropHost->propSetString(effectProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat);
 +
 +  gPropHost->propSetString(effectProps, kOfxPropLabel, 0, "OFX Box Blur");
 +  gPropHost->propSetString(effectProps, kOfxImageEffectPluginPropGrouping, 0, "OFX Example");
