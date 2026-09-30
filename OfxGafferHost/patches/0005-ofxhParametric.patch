@@ -58,7 +58,7 @@
  
  #include <unordered_map>
  #include <mutex>
-@@ -2332,8 +2334,256 @@
+@@ -2332,8 +2334,258 @@
          return NULL;
        }
  
@@ -163,6 +163,7 @@
 +      static OfxStatus parametricSetNthControlPoint(OfxParamHandle param, int curveIndex, double time, int nthCtl, double key, double value, bool addAnimationKey)
 +      {
 +        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->setNthControlPoint(curveIndex, time, nthCtl, key, value, addAnimationKey);
++        if(curveIndex < 0) return kOfxStatErrBadIndex;
 +        std::lock_guard<std::mutex> lock(g_curvesMutex);
 +        std::vector<std::vector<std::pair<double,double> > > &curves = g_handleToCurves[param];
 +        std::vector<std::pair<double,double> > &curve = curveForIndex(curves, curveIndex);
@@ -175,6 +176,7 @@
 +      static OfxStatus parametricAddControlPoint(OfxParamHandle param, int curveIndex, double time, double key, double value, bool addAnimationKey)
 +      {
 +        if(ParametricInstance *inst = parametricFromHandle(param)) return inst->addControlPoint(curveIndex, time, key, value, addAnimationKey);
++        if(curveIndex < 0) return kOfxStatErrBadIndex;
 +        std::lock_guard<std::mutex> lock(g_curvesMutex);
 +        insertControlPoint(curveForIndex(g_handleToCurves[param], curveIndex), key, value);
 +        return kOfxStatOK;
