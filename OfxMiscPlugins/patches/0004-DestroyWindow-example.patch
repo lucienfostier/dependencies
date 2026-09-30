@@ -3,7 +3,7 @@
 # Technical: new Examples/DestroyWindow (Makefile + Info.plist + destroy_window.cpp) following the BoxBlur precedent; SUBDIRS entry. Built by the existing Examples make invocation and installed by the existing bundle cp glob. Plugin id com.gaffer.DestroyWindow.
 --- a/Examples/DestroyWindow/destroy_window.cpp
 +++ b/Examples/DestroyWindow/destroy_window.cpp
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,228 @@
 +/* Minimal OFX test plugin: exercises param suite dispatch during
 + * kOfxActionDestroyInstance. On destroy it reads its "testValue" Int
 + * param and writes "<value> status=<stat>" to a probe file. The host
@@ -18,11 +18,13 @@
 +#include "ofxImageEffect.h"
 +#include "ofxParam.h"
 +
-+/* Probe path override for tests (unique per run). */
++/* Probe path override for tests (unique per run). NULL when unset so
++ * no file is touched outside tests (avoids predictable-/tmp symlink
++ * attacks on shared machines). */
 +static const char *probePath( void )
 +{
 +	const char *env = getenv( "OFX_DESTROY_WINDOW_PROBE" );
-+	return env && env[0] ? env : "/tmp/ofx_destroy_window_probe";
++	return env && env[0] ? env : NULL;
 +}
 +
 +static OfxHost *g_host = NULL;
@@ -155,7 +157,8 @@
 +			}
 +		}
 +	}
-+	FILE *f = fopen( probePath(), "w" );
++	const char *path = probePath();
++	FILE *f = path ? fopen( path, "w" ) : NULL;
 +	if( f )
 +	{
 +		fprintf( f, "%d status=%d\n", value, (int)stat );
@@ -262,7 +265,7 @@
 +include ../Makefile.master
 --- a/Examples/Makefile
 +++ b/Examples/Makefile
-@@ -1,4 +1,4 @@
+@@ -1,3 +1,3 @@
 -SUBDIRS = Basic BoxBlur Custom DepthConverter Invert OpenGL Overlay Rectangle Test
 +SUBDIRS = Basic BoxBlur Custom DestroyWindow DepthConverter Invert OpenGL Overlay Rectangle Test
  
