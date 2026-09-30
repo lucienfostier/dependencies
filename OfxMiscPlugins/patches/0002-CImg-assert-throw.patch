@@ -1,0 +1,48 @@
+# OfxMiscPlugins: CImg asserts throw instead of abort
+# Why: CImg plugins abort() on RoD contract violations; a host-side throw surfaces as render error instead of crash.
+--- a/CImg/CImgOperator.h
++++ b/CImg/CImgOperator.h
+@@ -26,6 +26,8 @@
+ #ifndef Misc_CImgOperator_h
+ #define Misc_CImgOperator_h
+ 
++#include <stdexcept>
++
+ #include "CImgFilter.h"
+ 
+ class CImgOperatorPluginHelperBase
+@@ -263,18 +265,11 @@
+     if (!_supportsTiles) {
+         // http://openfx.sourceforge.net/Documentation/1.3/ofxProgrammingReference.html#kOfxImageEffectPropSupportsTiles
+         //  If a clip or plugin does not support tiled images, then the host should supply full RoD images to the effect whenever it fetches one.
+-        assert(srcARoD.x1 == srcABounds.x1);
+-        assert(srcARoD.x2 == srcABounds.x2);
+-        assert(srcARoD.y1 == srcABounds.y1);
+-        assert(srcARoD.y2 == srcABounds.y2); // crashes on Natron if kSupportsTiles=0 & kSupportsMultiResolution=1
+-        assert(srcBRoD.x1 == srcBBounds.x1);
+-        assert(srcBRoD.x2 == srcBBounds.x2);
+-        assert(srcBRoD.y1 == srcBBounds.y1);
+-        assert(srcBRoD.y2 == srcBBounds.y2); // crashes on Natron if kSupportsTiles=0 & kSupportsMultiResolution=1
+-        assert(dstRoD.x1 == dstBounds.x1);
+-        assert(dstRoD.x2 == dstBounds.x2);
+-        assert(dstRoD.y1 == dstBounds.y1);
+-        assert(dstRoD.y2 == dstBounds.y2); // crashes on Natron if kSupportsTiles=0 & kSupportsMultiResolution=1
++        if (!(srcARoD.x1 == srcABounds.x1 && srcARoD.x2 == srcABounds.x2 && srcARoD.y1 == srcABounds.y1 && srcARoD.y2 == srcABounds.y2 &&
++              srcBRoD.x1 == srcBBounds.x1 && srcBRoD.x2 == srcBBounds.x2 && srcBRoD.y1 == srcBBounds.y1 && srcBRoD.y2 == srcBBounds.y2 &&
++              dstRoD.x1 == dstBounds.x1 && dstRoD.x2 == dstBounds.x2 && dstRoD.y1 == dstBounds.y1 && dstRoD.y2 == dstBounds.y2)) {
++            throw std::runtime_error("CImg: RoD/Bounds mismatch for non-tiled plugin");
++        }
+     }
+     if (!_supportsMultiResolution) {
+         // http://openfx.sourceforge.net/Documentation/1.3/ofxProgrammingReference.html#kOfxImageEffectPropSupportsMultiResolution
+@@ -303,7 +298,9 @@
+     Params params;
+     getValuesAtTime(time, params);
+     int srcBoundary = getBoundary(params);
+-    assert(0 <= srcBoundary && srcBoundary <= 2);
++    if (!(0 <= srcBoundary && srcBoundary <= 2)) {
++        throw std::runtime_error("CImg: srcBoundary out of range");
++    }
+ 
+ 
+     printRectI("srcARoD", srcARoD);
