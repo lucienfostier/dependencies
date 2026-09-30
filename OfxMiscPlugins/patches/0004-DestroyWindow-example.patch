@@ -3,7 +3,7 @@
 # Technical: new Examples/DestroyWindow (Makefile + Info.plist + destroy_window.cpp) following the BoxBlur precedent; SUBDIRS entry. Built by the existing Examples make invocation and installed by the existing bundle cp glob. Plugin id com.gaffer.DestroyWindow.
 --- a/Examples/DestroyWindow/destroy_window.cpp
 +++ b/Examples/DestroyWindow/destroy_window.cpp
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,235 @@
 +/* Minimal OFX test plugin: exercises param suite dispatch during
 + * kOfxActionDestroyInstance. On destroy it reads its "testValue" Int
 + * param and writes "<value> status=<stat>" to a probe file. The host
@@ -80,9 +80,16 @@
 +		return kOfxStatFailed;
 +	}
 +
-+	/* Source clip (Output is implicit). */
++	/* Source and Output clips are both mandatory in the filter context. */
 +	OfxPropertySetHandle clipProps = NULL;
 +	if( effectSuite->clipDefine( effect, kOfxImageEffectSimpleSourceClipName, &clipProps ) != kOfxStatOK )
++	{
++		return kOfxStatFailed;
++	}
++	propSuite->propSetString( clipProps, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA );
++	propSuite->propSetString( clipProps, kOfxImageEffectPropSupportedPixelDepths, 0, kOfxBitDepthFloat );
++
++	if( effectSuite->clipDefine( effect, kOfxImageEffectOutputClipName, &clipProps ) != kOfxStatOK )
 +	{
 +		return kOfxStatFailed;
 +	}
