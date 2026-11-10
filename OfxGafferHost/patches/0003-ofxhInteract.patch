@@ -1,0 +1,27 @@
+# OfxGafferHost : Add screen pixel ratio for interact
+#
+# Sapphire HUDs such as S_Blur's `Show_Blur_Amount` draw at the wrong
+# scale on HiDPI displays because HostSupport did not provide a screen
+# pixel ratio on the draw arguments.
+#
+# Add the `OfxInteractPropScreenPixelRatio` double property, default it
+# to 1.0 and set it on draw args so overlays can scale between format
+# and image coordinates.
+--- a/HostSupport/src/ofxhInteract.cpp
++++ b/HostSupport/src/ofxhInteract.cpp
+@@ -104,6 +104,7 @@
+         { kOfxInteractPropPenPressure, Property::eDouble, 1, false, "0.0" },
+         { kOfxPropKeyString, Property::eString, 1, false, "" },
+         { kOfxPropKeySym, Property::eInt, 1, false, "0" },
++        { "OfxInteractPropScreenPixelRatio", Property::eDouble, 1, false, "1.0" },
+         Property::propSpecEnd
+       };
+ 
+@@ -257,6 +258,7 @@
+         _argProperties.setPointerProperty(kOfxPropInstanceData, _properties.getPointerProperty(kOfxPropInstanceData));
+         _argProperties.setDoubleProperty(kOfxPropTime,time);
+         _argProperties.setDoublePropertyN(kOfxImageEffectPropRenderScale, &renderScale.x, 2);
++        _argProperties.setDoubleProperty("OfxInteractPropScreenPixelRatio", 1.0);
+       }
+                
+       void Instance::setPenArgProps(const OfxPointD &penPos,
